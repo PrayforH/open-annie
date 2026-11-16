@@ -237,6 +237,7 @@ if (CAPTURE) {
   // and lands on the same reset, so the kiosk never sticks in a dead call.
   const endBtn = document.getElementById("end");
   const endSession = (notice) => {
+    if (!live && mode === "idle") return; // idle close + broker echo land here twice
     endBtn.hidden = true;
     live = null;
     hud.voice = null;
@@ -251,7 +252,10 @@ if (CAPTURE) {
     try { live?.close(); } catch {}
     endSession("会话已结束，点画面可重新开始");
   };
-  bus.on("session.closed", () => endSession("会话已结束，点画面可重新开始"));
+  bus.on("session.closed", (e) =>
+    endSession(e?.reason === "idle"
+      ? "长时间没有对话，已自动断开 · 点画面重新开始"
+      : "会话已结束，点画面可重新开始"));
   const t0 = performance.now() / 1000;
   const wall = () => performance.now() / 1000 - t0;
   const loop = () => {

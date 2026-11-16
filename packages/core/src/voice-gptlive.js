@@ -15,6 +15,12 @@ const BARGEIN_HOLD_S = 0.35; // sustained this long confirms a barge-in (a cough
 const BARGEIN_CANCEL_S = 0.25; // quiet this long cancels a duck that never confirmed
 const PLAYOUT_RESUME_AFTER_S = 0.4; // do not resume on the tail of the cut turn
 const SESSION_WARN_S = 20; // fallback when the broker omits warn_s
+// A kiosk left open in front of nobody still bills every second of the WebRTC
+// call. The broker reaps idle sessions too, but only while its sideband attach
+// is up; when that fallback runs on the wall clock, silence runs to the hard
+// cap. So the browser closes the call after this much true silence: no user
+// voice, no Annie speech, no transcript on either side.
+export const IDLE_DISCONNECT_S = 90;
 const MIC_GATE = 0.15; // mic aperture treated as voice (~ -37 dBFS)
 // Retrieval starts on partial transcripts, ~1.5 s before user.final, so the
 // appended facts can land before GPT-Live begins the answer.
@@ -103,9 +109,13 @@ export function findL0Card(cards, query) {
 export class GptLiveVoice {
   // `mic` may be any MediaStream (a synthetic one drives scripted live recordings);
   // `onRaw` sees every data-channel event, for logging.
-  constructor({ bus, brokerUrl, voice = "marin", instructions, clock, mic, onRaw, rag = null, delegationTimeoutMs, l0Cards }) {
+  constructor({ bus, brokerUrl, voice = "marin", instructions, clock, mic, onRaw, rag = null, delegationTimeoutMs, l0Cards, idleDisconnectS }) {
     Object.assign(this, { bus, brokerUrl: brokerUrl.replace(/\/$/, ""), voice, instructions, clock, mic, onRaw, rag });
     this.delegationTimeoutMs = delegationTimeoutMs ?? DELEGATION_WATCHDOG_MS;
+    // null until the call is up: a session that never connected has nothing to bill.
+    this.lastActivity = null;
+    this.idleDisconnectS = idleDisconnectS ?? IDLE_DISCONNECT_S;
+    this.closed = false;
     // Provided explicitly for tests/callers, otherwise lifted from the cards
     // that already ride in with the persona.
     this.l0Cards = l0Cards ?? parseL0Cards(instructions);
@@ -179,6 +189,9 @@ export class GptLiveVoice {
     this.token = s.token;
     this.expiresAt = s.expires_at;
     this.sessionWarnS = Number.isFinite(s.warn_s) ? s.warn_s : SESSION_WARN_S;
+    // The call is up and billable from here; the idle countdown starts now.
+    this.closed = false;
+    this.lastActivity = this.clock.now();
     await this.pc.setRemoteDescription({ type: "answer", sdp: s.sdp });
     this.#armCapWarning();
     return s;
@@ -248,6 +261,19 @@ export class GptLiveVoice {
     this.speaking = mouthSpeaking;
     if (mouthSpeaking) this.lastAnnieActive = now;
     const u = this.user, a = this.asst;
+    // Idle shutdown, checked on the same frame clock as everything else: the
+    // countdown only runs while the call is up, and resets on any sign of life
+    // on either side of the conversation.
+    if (this.lastActivity != null && !this.closed) {
+      const micAmp = this.micAnalyser?.sample()?.amp ?? 0;
+      const isActive = mouthSpeaking || micAmp > MIC_GATE || u.open || a.open;
+      if (isActive) this.lastActivity = now;
+      else if (now - this.lastActivity >= this.idleDisconnectS) {
+        const idleS = Math.round(now - this.lastActivity);
+        this.bus.emit("session.idle", { idle_s: idleS });
+        this.close("idle");
+      }
+    }
     if (u.open && now - u.last > TURN_QUIET_S) {
       u.open = false;
       const text = u.text.trim();
@@ -620,7 +646,13 @@ export class GptLiveVoice {
     }
   }
 
-  close() {
+  // `reason` is set only when the call ends itself (idle, cap), so the stage can
+  // reset the kiosk without waiting for an echo from the broker. A visitor-facing
+  // hang-up passes none and the stage resets from the click it already handled.
+  close(reason = null) {
+    if (this.closed) return;
+    this.closed = true;
+    this.lastActivity = null;
     clearTimeout(this.capTimer);
     this.#clearDelegation();
     try {
@@ -631,5 +663,6 @@ export class GptLiveVoice {
       this.pc?.close();
       this.mic?.getTracks().forEach((t) => t.stop());
     }, 1500);
+    if (reason) setTimeout(() => this.bus.emit("session.closed", { reason }), 0);
   }
 }

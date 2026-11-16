@@ -9,6 +9,7 @@ import {
   DELEGATION_FALLBACK,
   DELEGATION_WATCHDOG_MS,
   GptLiveVoice,
+  IDLE_DISCONNECT_S,
   findL0Card,
   parseL0Cards,
 } from "../src/voice-gptlive.js";
@@ -403,4 +404,48 @@ test("L0 cards parse from the persona block and match by overlap, not exact titl
   assert.equal(findL0Card(cards, "随申办企业云有哪些频道")?.text.includes("五个频道"), true);
   assert.equal(findL0Card(cards, "城市视觉中枢是做什么的")?.text.includes("视频资源"), true);
   assert.equal(findL0Card(cards, "你好"), null);
+});
+
+test("a call nobody talks to is closed after IDLE_DISCONNECT_S", () => {
+  const { voice } = makeVoice();
+  voice.asst = { open: false, text: "", last: -Infinity };
+  voice.user = { open: false, text: "", last: -Infinity };
+  voice.lastActivity = 0; // the call came up at t=0
+  let idle = null;
+  voice.bus.on("session.idle", (e) => (idle = e));
+  voice.tick(IDLE_DISCONNECT_S - 1, false);
+  assert.equal(voice.closed, false, "still inside the idle window");
+  voice.tick(IDLE_DISCONNECT_S + 1, false);
+  assert.equal(voice.closed, true, "closed once the window passed");
+  assert.ok(idle && idle.idle_s >= IDLE_DISCONNECT_S, "idle event carries the silence length");
+});
+
+test("speech on either side keeps the call alive", () => {
+  const { voice, mic } = makeVoice();
+  voice.asst = { open: false, text: "", last: -Infinity };
+  voice.user = { open: false, text: "", last: -Infinity };
+  voice.lastActivity = 0;
+  voice.tick(IDLE_DISCONNECT_S - 5, true); // Annie is speaking
+  voice.tick(IDLE_DISCONNECT_S + 5, false); // 10 s later: only 10 s of silence
+  assert.equal(voice.closed, false, "Annie's speech reset the countdown");
+  mic.amp = 0.4; // a visitor starts talking
+  voice.tick(IDLE_DISCONNECT_S + 15, false);
+  voice.tick(IDLE_DISCONNECT_S + 20, false);
+  assert.equal(voice.closed, false, "the visitor's voice reset the countdown");
+});
+
+test("close() is idempotent and only self-closes announce themselves", async () => {
+  const { voice, events } = makeVoice();
+  voice.bus.on("session.closed", (e) => events.push(e));
+  voice.close();
+  voice.close();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(events.length, 0, "a manual hang-up does not emit session.closed");
+  const { voice: v2, events: e2 } = makeVoice();
+  v2.bus.on("session.closed", (e) => e2.push(e));
+  v2.close("idle");
+  v2.close("idle");
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(e2.length, 1, "an idle close announces itself exactly once");
+  assert.equal(e2[0].reason, "idle");
 });
