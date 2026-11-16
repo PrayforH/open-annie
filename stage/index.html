@@ -4,16 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>open-annie</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600&family=Geist+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="stage.css">
 <script type="importmap">
 {
   "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/",
-    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.min.js",
-    "@pixiv/three-vrm-animation": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm-animation@3.5.5/lib/three-vrm-animation.module.min.js"
+    "three": "/vendor/three/build/three.module.js",
+    "three/addons/": "/vendor/three/examples/jsm/",
+    "@pixiv/three-vrm": "/vendor/@pixiv/three-vrm/lib/three-vrm.module.min.js",
+    "@pixiv/three-vrm-animation": "/vendor/@pixiv/three-vrm-animation/lib/three-vrm-animation.module.min.js"
   }
 }
 </script>
@@ -48,6 +46,9 @@
   </div>
 
   <button id="play" class="play">Play the demo</button>
+  <button id="end" class="end" hidden>结束会话</button>
+
+  <div class="offline-notice" id="offline-notice" role="status" hidden>当前为离线导览，暂不支持自由问答</div>
 </div>
 <script type="module" src="stage.js"></script>
 </body>

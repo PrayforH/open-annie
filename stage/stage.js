@@ -9,8 +9,18 @@ import { ReplayVoice } from "../packages/core/src/voice-replay.js";
 import { Hud } from "./hud.js";
 import { createStage } from "./scene.js";
 import { tuneSprings } from "../packages/core/src/cloth.js";
+import { isLocalStage } from "../packages/core/src/net.js";
 
 const params = new URLSearchParams(location.search);
+const configuredBroker = params.get("broker");
+// The exhibit runs from a LAN address; public hostnames stay refused unless the
+// page is opened with ?lan=1 (an explicit operator override).
+const localStage = isLocalStage(location.hostname, params);
+const legacyLocalBroker = /^http:\/\/(?:127\.0\.0\.1|localhost):(?:8787|18787)\/?$/.test(configuredBroker ?? "");
+const brokerUrl = params.has("live") && localStage && (!configuredBroker || legacyLocalBroker)
+  ? "/voice"
+  : configuredBroker;
+const LIVE = params.has("live") && Boolean(brokerUrl);
 const CAPTURE = params.has("capture");
 const ROOT = new URL("../", import.meta.url).href;
 if (CAPTURE) document.body.classList.add("capture");
@@ -40,8 +50,8 @@ async function pickDecider() {
     d.skipUnmatched = params.has("replay");
     return d;
   }
-  if (params.get("broker")) {
-    const url = params.get("broker");
+  if (!LIVE && brokerUrl) {
+    const url = brokerUrl;
     const token = params.get("token") ?? (await fetch(`${url}/dev-token`).then((r) => (r.ok ? r.json() : {})).catch(() => ({}))).token;
     return new BrokerDecider({ url, getToken: () => token });
   }
@@ -186,7 +196,6 @@ function step(t, mode = "script") {
 
 // Live mode: real mic, GPT-Live via the broker, Jev with the session's token.
 let live = null;
-const LIVE = params.has("live") && params.get("broker");
 function liveCaptions() {
   // Present live transcripts through the same caption interface as the script.
   const beat = (who, s) => ({ who, start: -1, end: Infinity, words: s.text.trim().split(/\s+/).filter(Boolean).map((w) => ({ word: w, start_s: 0 })) });
@@ -221,6 +230,28 @@ if (CAPTURE) {
   const btn = document.getElementById("play");
   document.getElementById("title-card").style.opacity = "0";
   let mode = "idle";
+
+  // Staff-facing end control: leaves live mode without closing the browser.
+  // close() sends session.close, stops the mic and local playout, and frees
+  // the broker slot. The broker's own 300 s cap arrives as "session.closed"
+  // and lands on the same reset, so the kiosk never sticks in a dead call.
+  const endBtn = document.getElementById("end");
+  const endSession = (notice) => {
+    endBtn.hidden = true;
+    live = null;
+    hud.voice = null;
+    mode = "idle";
+    if (LIVE) {
+      btn.hidden = false;
+      btn.textContent = "🎙 重新开始";
+    }
+    if (notice) hud.notice(notice);
+  };
+  endBtn.onclick = () => {
+    try { live?.close(); } catch {}
+    endSession("会话已结束，点画面可重新开始");
+  };
+  bus.on("session.closed", () => endSession("会话已结束，点画面可重新开始"));
   const t0 = performance.now() / 1000;
   const wall = () => performance.now() / 1000 - t0;
   const loop = () => {
@@ -229,40 +260,118 @@ if (CAPTURE) {
   };
   requestAnimationFrame(loop);
   if (LIVE) {
-    btn.textContent = "🎙 Talk to Annie";
-    hud.setHonesty("live · voice: GPT-Live-1 over WebRTC · decisions: Jev via broker · lipsync, face and body computed in the browser");
+    btn.textContent = "🎙 开始实时通话";
+    hud.setHonesty("live · voice: GPT-Live-1 over WebRTC · decisions via broker · lipsync, face and body computed in the browser");
     hud.setMode("live");
   }
   btn.onclick = async () => {
     btn.hidden = true;
     if (LIVE) {
+      // getUserMedia only exists in a secure context. Plain http:// from a LAN
+      // address is not one; the same app is served over HTTPS on port 18443.
+      if (!navigator.mediaDevices?.getUserMedia) {
+        btn.hidden = false;
+        btn.textContent = `局域网语音需要 HTTPS · 用 https://${location.hostname}:18443/stage/?live=1 打开`;
+        return;
+      }
       const { GptLiveVoice } = await import("../packages/core/src/voice-gptlive.js");
       const liveClock = { now: wall };
-      live = new GptLiveVoice({
-        bus, brokerUrl: params.get("broker"), clock: liveClock, voice: "willow",
-        instructions: await fetch(new URL("persona/character.md", ROOT)).then((r) => r.text()),
+      // L1: optional cards for this exhibit area ride in with the persona, so the
+      // area's facts are in the session before the first question is asked.
+      let instructions = await fetch(new URL("persona/character.md", ROOT)).then((r) => r.text());
+      const area = params.get("area");
+      if (brokerUrl) {
+        const cards = await fetch(`${brokerUrl}/rag/cards${area ? `?area=${encodeURIComponent(area)}` : ""}`)
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null);
+        if (cards?.text) instructions = `${instructions}\n\n${cards.text}`;
+      }
+      // ?debug=1 keeps the last 500 data-channel events for timing checks.
+      const onRaw = params.has("debug")
+        ? (e) => {
+            const log = (window.__liveEvents ??= []);
+            log.push({ t: performance.now(), type: e.type, delegation_id: e.delegation?.id ?? e.delegation_id });
+            if (log.length > 5000) log.shift();
+          }
+        : undefined;
+      if (params.has("debug")) {
+        bus.on("rag.context", (d) => console.info(`[rag] ${JSON.stringify(d)}`));
+        bus.on("rag.miss", (d) => console.info(`[rag-miss] ${JSON.stringify(d)}`));
+        const local = (type) => (d) => {
+          const log = (window.__liveEvents ??= []);
+          log.push({ t: performance.now(), type: `local.${type}`, ...d });
+          if (log.length > 500) log.shift();
+        };
+        bus.on("playback.stopped", local("playback.stopped"));
+        bus.on("playback.resumed", local("playback.resumed"));
+        // Delegation must never wait; these record when it was created and how
+        // it was answered, so a stall shows up in the event log with its reason.
+        // Map explicitly: the payload has its own `type`, which must not replace
+        // the log entry's type.
+        bus.on("delegation.created", (d) => local("delegation.created")({ id: d.id, target: d.target }));
+        bus.on("delegation.released", (d) =>
+          local("delegation.released")({ id: d.id, reason: d.reason, ms: d.ms, appended: d.appended }),
+        );
+      }
+      live = new GptLiveVoice({ bus, brokerUrl, clock: liveClock, voice: "willow", instructions, onRaw });
+      // Autoplay can be refused after the async SDP exchange: one tap restores it.
+      bus.on("playback.blocked", () => {
+        hud.notice("浏览器静音了，点一下画面恢复声音");
+        const resume = () => {
+          const played = live?.el?.play();
+          if (played?.catch) played.catch(() => {});
+          document.removeEventListener("pointerdown", resume);
+        };
+        document.addEventListener("pointerdown", resume, { once: true });
       });
       try {
-        await live.connect();
+        const s = await live.connect();
+        live.enableRag(s.rag);
       } catch (e) {
         btn.hidden = false;
         btn.textContent = `Voice unavailable (${e.message}) · retry`;
         return;
       }
       annie.clock = liveClock;
-      annie.decider = new BrokerDecider({ url: params.get("broker"), getToken: () => live.token });
+      annie.decider = new BrokerDecider({ url: brokerUrl, getToken: () => live.token });
       liveCaptions();
       mode = "live";
+      endBtn.hidden = false;
       return;
     }
-    mode = "script";
     const ctx = new AudioContext();
+    // Replays have one continuous Annie track plus the recorded user clips;
+    // their caption beats do not contain the scripted voice.audio buffers.
+    const clips = session
+      ? [...session.userPlays.map((u) => ({ file: `demo/audio/${u.file}`, start: u.t })),
+         { file: session.audio.file, start: session.audio.start }]
+      : timeline.beats;
+    let decoded;
+    try {
+      await ctx.resume();
+      decoded = await Promise.all(clips.map(async (clip) => {
+        const data = session
+          ? await fetch(new URL(clip.file, ROOT)).then((r) => {
+              if (!r.ok) throw new Error(`Audio ${r.status}`);
+              return r.arrayBuffer();
+            })
+          : voice.audio[clip.id].slice(0);
+        return { start: clip.start, buffer: await ctx.decodeAudioData(data) };
+      }));
+    } catch (e) {
+      await ctx.close();
+      btn.hidden = false;
+      btn.textContent = `Playback unavailable (${e.message}) · retry`;
+      return;
+    }
+    // Decode before starting the shared clock so downloads cannot desync it.
+    mode = "script";
     const a0 = ctx.currentTime + 0.1;
-    for (const b of timeline.beats) {
+    for (const clip of decoded) {
       const src = ctx.createBufferSource();
-      src.buffer = await ctx.decodeAudioData(voice.audio[b.id].slice(0));
+      src.buffer = clip.buffer;
       src.connect(ctx.destination);
-      src.start(a0 + b.start);
+      src.start(a0 + clip.start);
     }
     last = 0;
     const run = () => {
@@ -273,3 +382,14 @@ if (CAPTURE) {
     requestAnimationFrame(run);
   };
 }
+
+// ---- offline fallback (D2) --------------------------------------------------
+// When the venue network drops, keep the avatar on screen and say plainly that
+// free-form Q&A is unavailable — only the pre-recorded guide plays.
+const offlineNotice = document.getElementById("offline-notice");
+function syncOfflineNotice() {
+  if (offlineNotice) offlineNotice.hidden = navigator.onLine;
+}
+window.addEventListener("online", syncOfflineNotice);
+window.addEventListener("offline", syncOfflineNotice);
+syncOfflineNotice();

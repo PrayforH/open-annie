@@ -25,6 +25,9 @@ from . import tokens
 from .budget import Budget, Rejected
 from .config import VERSION, Settings
 from .decide import DecideClient, DecideInvalid, DecideUnavailable
+from .lan import origin_allowed as lan_origin_allowed
+from .lan import parse_networks
+from .rag import RagClient
 from .reaper import Reaper
 from .voice import VoiceClient, VoiceError
 
@@ -48,6 +51,12 @@ class DecideRequest(BaseModel):
     questions: dict[str, dict] = Field(min_length=1, max_length=64)
 
 
+class RagRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    token: str = Field(max_length=512)
+    query: str = Field(min_length=1, max_length=200)
+
+
 def _err(code: str, **extra: Any) -> dict:
     return {"error": code, **extra}
 
@@ -66,6 +75,7 @@ class Broker:
         *,
         openai_transport: Optional[httpx.AsyncBaseTransport] = None,
         typesafe_transport: Optional[httpx.AsyncBaseTransport] = None,
+        rag_transport: Optional[httpx.AsyncBaseTransport] = None,
         sideband_connect: Optional[Callable] = None,
         clock: Callable[[], float] = time.time,
     ):
@@ -74,9 +84,11 @@ class Broker:
         self.budget = Budget(self.s, clock)
         self.voice = VoiceClient(self.s, openai_transport)
         self.decider = DecideClient(self.s, typesafe_transport)
+        self.rag = RagClient(self.s, rag_transport, clock)
         self.reaper = Reaper(self.s, self.budget, self.voice, sideband_connect, clock)
         self.origin_regex = origin_matcher(self.s.allowed_origins)
         self._origin_re = re.compile(self.origin_regex) if self.origin_regex else None
+        self.lan_networks = parse_networks(self.s.lan_cidrs)
 
     async def start(self) -> None:
         self.decider.start_warm()
@@ -85,6 +97,7 @@ class Broker:
         await self.reaper.aclose()
         await self.voice.aclose()
         await self.decider.aclose()
+        await self.rag.aclose()
 
     # -- request context -----------------------------------------------------
 
@@ -92,7 +105,11 @@ class Broker:
         # Non-browser callers send no Origin; the budget and per-IP limits still apply.
         if origin is None or self._origin_re is None:
             return True
-        return bool(self._origin_re.match(origin))
+        if self._origin_re.match(origin):
+            return True
+        # The exhibit is opened from a LAN address, not localhost: accept private
+        # origins while still refusing anything that resolves outside the LAN.
+        return lan_origin_allowed(origin, self.lan_networks, self.s.lan_hosts)
 
     def client_ip(self, headers: Any, peer: Optional[str]) -> str:
         if self.s.ip_header and (value := headers.get(self.s.ip_header)):
@@ -105,7 +122,15 @@ class Broker:
         return {
             "ok": True,
             "version": VERSION,
-            "providers": {"voice": self.voice.available, "decide": self.decider.available},
+            "providers": {
+                "voice": self.voice.available,
+                "decide": self.decider.available,
+                "rag": self.rag.available,
+            },
+            # Operational limits, so a deploy can be checked without placing a call.
+            "session": {"cap_s": self.s.session_cap_s, "warn_s": self.s.session_warn_s},
+            "lan_cidrs": list(self.s.lan_cidrs),
+            "rag": self.rag.status(),
         }
 
     def status(self) -> dict:
@@ -153,6 +178,11 @@ class Broker:
             "session_id": minted.session_id,
             "expires_at": expires_at,
             "token": token,
+            # Say a wrap-up line before the cap closes the call; the browser schedules it.
+            "session_cap_s": self.s.session_cap_s,
+            "warn_s": self.s.session_warn_s,
+            # The browser fetches /rag once per user turn when enabled.
+            "rag": {"enabled": self.rag.available, "timeout_ms": int(self.s.rag_timeout_s * 1000)},
         }
 
     async def decide(self, payload: Any) -> tuple[int, dict]:
@@ -171,9 +201,31 @@ class Broker:
         except DecideInvalid:
             return 422, _err("decide_invalid")
         usage = body.get("usage")
-        if isinstance(usage, dict) and isinstance(usage.get("input_tokens"), int):
+        if self.decider.provider == "jev" and isinstance(usage, dict) and isinstance(usage.get("input_tokens"), int):
             self.budget.add_jev(usage["input_tokens"])
         return 200, body
+
+    async def rag_query(self, raw: Union[bytes, str], origin: Optional[str]) -> tuple[int, dict]:
+        """One retrieval per user turn; always 200 for a valid token, empty context on failure."""
+        if not self.origin_allowed(origin):
+            return 403, _err("origin_not_allowed")
+        if len(raw) > MAX_BODY_BYTES:
+            return 413, _err("too_large")
+        try:
+            req = RagRequest.model_validate_json(raw)
+        except (ValueError, ValidationError):
+            return 400, _err("invalid_request")
+        try:
+            session_id = tokens.verify(self.s.hmac_secret, req.token, self.clock())
+        except tokens.TokenError:
+            return 401, _err("invalid_token")
+        answer = await self.rag.query(req.query, session_key=session_id)
+        return 200, answer.as_dict()
+
+    def rag_cards(self, area: Optional[str], origin: Optional[str]) -> tuple[int, dict]:
+        if not self.origin_allowed(origin):
+            return 403, _err("origin_not_allowed")
+        return 200, self.rag.cards(area)
 
     async def decide_raw(self, raw: Union[bytes, str], origin: Optional[str]) -> tuple[int, dict]:
         if not self.origin_allowed(origin):
@@ -290,6 +342,18 @@ def create_app(settings: Optional[Settings] = None, broker: Optional[Broker] = N
             return respond((413, _err("too_large")))
         ip = broker.client_ip(request.headers, request.client.host if request.client else None)
         return respond(await broker.session(raw, ip, request.headers.get("origin")))
+
+    @app.post("/rag")
+    async def rag(request: Request) -> JSONResponse:
+        raw = await read_limited(request)
+        if raw is None:
+            return respond((413, _err("too_large")))
+        return respond(await broker.rag_query(raw, request.headers.get("origin")))
+
+    @app.get("/rag/cards")
+    async def rag_cards(request: Request) -> JSONResponse:
+        area = request.query_params.get("area")
+        return respond(broker.rag_cards(area, request.headers.get("origin")))
 
     @app.post("/decide")
     async def decide(request: Request) -> JSONResponse:

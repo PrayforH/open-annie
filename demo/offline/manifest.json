@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "status": "pending-assets",
+  "note": "D2 断网兜底素材清单。素材未交付前 /offline 路由不启用；规格见 docs/展厅_现场集成清单_v1.0.md §3.3.1。",
+  "poster": "poster.jpg",
+  "segments": [
+    { "file": "01_welcome.mp4", "duration_s": 20, "title": "迎宾", "owner": "产品规划(文稿) / 实时语音(配音) / 应用工程(合流)" },
+    { "file": "02_point_license.mp4", "duration_s": 70, "title": "讲解点1 牌照与BNM监管", "owner": "同上" },
+    { "file": "03_point_payment.mp4", "duration_s": 70, "title": "讲解点2 自营、豁免还是接持牌机构", "owner": "同上" },
+    { "file": "04_point_data.mp4", "duration_s": 70, "title": "讲解点3 数据合规与 PDPA", "owner": "同上" },
+    { "file": "05_farewell.mp4", "duration_s": 15, "title": "送别", "owner": "同上" }
+  ],
+  "fallback": {
+    "existing_demo": "../../docs/media/open-annie-demo.mp4",
+    "existing_demo_s": 97.1,
+    "reason": "仓库演示，非展厅脚本；仅作切换演练用"
+  }
+}

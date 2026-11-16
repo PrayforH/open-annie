@@ -50,7 +50,11 @@ export const MOUTH = {
   gate: 0.04, // amp below this is silence (~ -39 dBFS)
   whisper: 0.45, // aperture at the gate; loud speech reaches 1
   hold: 0.16, // "speaking" stays on this long after the last voiced frame
-  talkOn: 0.12, // emotion -> talking-face crossfade
+  // Speech onset must hand the mouth over faster than the mouth opens (attack 0.025 s).
+  // At 0.12 s the full emotion preset (e.g. Fcl_ALL_Surprised, which includes mouth
+  // shapes) stayed on top of live vowels for ~0.3 s: measured peak 0.273 full-face
+  // weight while the mouth was moving. 0.03 s drops that to 0.029 with no visible pop.
+  talkOn: 0.03, // emotion -> talking-face crossfade
   talkOff: 0.35,
 };
 
@@ -59,6 +63,9 @@ export const GAINS = {
   default: { aa: 1, ih: 0.9, ou: 0.9, ee: 0.9, oh: 0.95, open: 1 },
   // Open vowels boosted after review: the tuned mapping read small on camera.
   AvatarSample_A: { aa: 1.15, ih: 0.9, ou: 1.05, ee: 1.0, oh: 1.1, open: 1.12 },
+  // Same VRoid sample family and morph set as A; the tuned boost reads the same
+  // size on camera. Kept as its own key so it can be retuned independently.
+  AvatarSample_B: { aa: 1.15, ih: 0.9, ou: 1.05, ee: 1.0, oh: 1.1, open: 1.12 },
 };
 
 // While talking, VRoid's mouth-including emotion shapes (Fcl_ALL_*) hand over to

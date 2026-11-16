@@ -25,19 +25,21 @@ def test_health_without_keys(make_client):
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True and body["version"]
-    assert body["providers"] == {"voice": False, "decide": False}
+    assert body["providers"] == {"voice": False, "decide": False, "rag": False}
 
 
 def test_health_with_keys(make_client):
-    assert make_client().get("/health").json()["providers"] == {"voice": True, "decide": True}
+    assert make_client().get("/health").json()["providers"] == {"voice": True, "decide": True, "rag": False}
 
 
 def test_status_shape(make_client):
     body = make_client().get("/status").json()
     assert set(body) == {
-        "spent_today_usd", "budget_usd", "active_sessions", "max_sessions", "voice_seconds_today"
+        "spent_today_usd", "budget_usd", "active_sessions", "max_sessions", "voice_seconds_today",
+        "voice_usd_per_min", "session_cap_s", "session_cap_usd", "sessions_per_budget",
     }
     assert body["budget_usd"] == 25.0 and body["max_sessions"] == 20
+    assert body["sessions_per_budget"] == 100  # $25 / (300 s x $0.05/min)
 
 
 # -- /decide -----------------------------------------------------------------
@@ -60,6 +62,20 @@ def test_decide_happy_path(make_client):
 def test_decide_without_key_is_503(make_client):
     r = make_client(typesafe_api_key=None).post("/decide", json=decide_body())
     assert r.status_code == 503 and r.json()["error"] == "decide_unavailable"
+
+
+def test_local_d1_keeps_session_auth_and_skips_jev_charges(make_client):
+    upstream = Upstream()
+    client = make_client(typesafe=upstream, d1_base_url="http://127.0.0.1:18788")
+    assert client.post("/decide", json=decide_body(token="invalid")).status_code == 401
+    response = client.post("/decide", json=decide_body(), headers=ORIGIN)
+    assert response.status_code == 200
+    assert response.json()["source"] == "d1"
+    assert response.json()["answers"] == JEV_OK["answers"]
+    request = next(r for r in upstream.requests if r.method == "POST")
+    assert str(request.url) == "http://127.0.0.1:18788/v1/systemone"
+    assert "authorization" not in request.headers
+    assert client.get("/status").json()["spent_today_usd"] == 0
 
 
 def test_decide_rejects_bad_and_expired_tokens(make_client):
@@ -148,6 +164,29 @@ def test_decide_origin_check(make_client):
     assert r.status_code == 403
 
 
+def test_decide_accepts_private_lan_origin(make_client):
+    r = make_client().post("/decide", json=decide_body(), headers={"Origin": "http://172.20.109.60:18080"})
+    assert r.status_code == 200
+
+
+def test_session_refuses_public_origin(make_client):
+    r = make_client(openai=Upstream(live_session_ok)).post(
+        "/session",
+        json={"sdp": OFFER, "voice": "cedar", "instructions": "Be Annie."},
+        headers={"Origin": "https://exhibit.example.com"},
+    )
+    assert r.status_code == 403
+
+
+def test_session_accepts_private_lan_origin(make_client):
+    r = make_client(openai=Upstream(live_session_ok)).post(
+        "/session",
+        json={"sdp": OFFER, "voice": "cedar", "instructions": "Be Annie."},
+        headers={"Origin": "http://192.168.1.20:18080"},
+    )
+    assert r.status_code == 200, r.text
+
+
 # -- WS /decide ----------------------------------------------------------------
 
 
@@ -178,7 +217,8 @@ def test_session_mints_via_sdp_exchange(make_client):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["sdp"] == ANSWER and body["session_id"] == "live_123"
-    assert before + 180 <= body["expires_at"] <= int(time.time()) + 180
+    assert before + 300 <= body["expires_at"] <= int(time.time()) + 300
+    assert body["session_cap_s"] == 300 and body["warn_s"] == 20
     assert tokens.verify(BASE.hmac_secret, body["token"]) == "live_123"
 
     sent = oai.requests[0]
@@ -243,8 +283,8 @@ def test_session_empty_openai_balance_is_named(make_client):
 
 
 def test_budget_exhaustion_rejects_session(make_client):
-    # One 180 s session reserves $0.15; a $0.20 budget admits exactly one.
-    c = make_client(daily_budget_usd=0.20)
+    # One 300 s session reserves $0.25; a $0.30 budget admits exactly one.
+    c = make_client(daily_budget_usd=0.30)
     assert c.post("/session", json={"sdp": OFFER}).status_code == 200
     r = c.post("/session", json={"sdp": OFFER})
     assert r.status_code == 429 and r.json() == {"error": "budget_exhausted"}

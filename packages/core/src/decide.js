@@ -43,7 +43,7 @@ export class BrokerDecider {
       if (!res.ok) throw new Error(`decide ${res.status}`);
       const body = await res.json();
       this.failures = 0;
-      return { answers: body.answers, usage: body.usage, latency_ms: performance.now() - now, source: "jev" };
+      return { answers: body.answers, usage: body.usage, latency_ms: performance.now() - now, source: body.source === "d1" ? "d1" : "jev" };
     } catch {
       if (++this.failures >= 3) {
         this.pausedUntil = performance.now() + 30_000;

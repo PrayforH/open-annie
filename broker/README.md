@@ -89,10 +89,13 @@ After the first deploy, check which `X-Forwarded-For` the fal gateway sends and 
 | `ANNIE_HMAC_SECRET` | random per process | set it, or tokens die on restart |
 | `ANNIE_DAILY_BUDGET_USD` | 25 | voice seconds × $0.05/60 + Jev tokens × $0.042/M |
 | `ANNIE_MAX_SESSIONS` | 20 | concurrent voice sessions |
-| `ANNIE_SESSION_CAP_S` | 180 | hard per-session cap |
+| `ANNIE_SESSION_CAP_S` / `ANNIE_SESSION_WARN_S` | 300 / 20 | product floor is 5 min; the browser speaks a wrap-up line 20 s before the cap |
 | `ANNIE_IDLE_TIMEOUT_S` | 30 | close after this long with no speech (needs the sideband) |
 | `ANNIE_PER_IP_DAILY` | 2 (0 locally) | sessions per IP per UTC day; 0 = off |
+| `ANNIE_DAILY_BUDGET_USD` / `ANNIE_VOICE_USD_PER_MIN` | 25 / 0.05 | accounting uses the supplier's per-minute bill, never the product target; capacity is `budget / (cap_s/60 × price)` (visible at `GET /status`) |
+| `ANNIE_JEV_USD_PER_MTOK` | 0.042 | Jev input-token price per million; output is free |
 | `ANNIE_ALLOWED_ORIGINS` | `http://localhost:*,http://127.0.0.1:*` | comma list; `*` wildcards; `*` alone = any |
+| `ANNIE_LAN_CIDRS` / `ANNIE_LAN_HOSTS` | RFC1918 + `fc00::/7` / `.local` | private origins allowed for the exhibit LAN; public origins stay refused |
 | `JEV_MODEL` / `GPTLIVE_MODEL` | `jev-latest` / `gpt-live-1` | |
 | `ANNIE_JEV_RPM` | 1000 | governor rate (Jev limit is 1,200) |
 | `ANNIE_DECIDE_TIMEOUT_S` | 1.5 | server-side Jev deadline |
@@ -103,11 +106,19 @@ After the first deploy, check which `X-Forwarded-For` the fal gateway sends and 
 | `ANNIE_HANGUP_FALLBACK` | 1 | without a sideband, call `/hangup` at the cap |
 | `ANNIE_IP_HEADER` | – (fal: `x-forwarded-for`) | header holding the client IP (leftmost entry) |
 | `ANNIE_SAFETY_IDENTIFIER` | 0 | send a hashed IP as `OpenAI-Safety-Identifier` |
+| `ANNIE_RAG_BASE_URL` / `ANNIE_RAG_KB_ID` | `http://127.0.0.1:8881/api/v1` / – | enables `/rag` when a KB is set |
+| `ANNIE_RAG_API_KEY` (or `ANNIE_RAG_EMAIL` + `ANNIE_RAG_PASSWORD`) | – | WeKnora auth; a scoped `retrieve` key is preferred |
+| `ANNIE_RAG_TIMEOUT_S` / `ANNIE_RAG_CONNECT_TIMEOUT_S` | 1.2 / 0.3 | caller-side deadline; failures return `{context:"", reason}` |
+| `ANNIE_RAG_HYBRID` | 0 | ask for the keyword branch; leave off — upstream WeKnora 0.9 fails it (`SQLSTATE XX000`), and `/health` reports `hybrid_available:false` either way |
+| `ANNIE_RAG_THRESHOLD` | 0.55 | vector top-1 cut-off (measured: in-domain ≥0.647, out-domain ≤0.467) |
+| `ANNIE_RAG_RERANK_MODEL` / `ANNIE_RAG_RERANK_THRESHOLD` | – / 0.3 | optional; rerank scores use their own threshold |
+| `ANNIE_RAG_TOP_K` / `ANNIE_RAG_MAX_SNIPPETS` / `ANNIE_RAG_MAX_CHARS` | 3 / 2 / 420 | RAG context goes in via `session.thinking.append` (quiet, no speech interruption); 420 chars keeps it under the 500-token cap |
+| `ANNIE_RAG_CARDS_PATH` | – | JSON list of `{title, text, areas}` for L0/L1 cards via `GET /rag/cards?area=` |
 
 ## Cost notes
 
-- **Voice.** $0.05/min, billed per second. Every WebRTC session is billed at least 15 s. A full 180 s session costs
-  $0.15, so the $25 default allows about 166 capped sessions a day. Admission reserves each open session at its cap,
+- **Voice.** $0.05/min, billed per second. Every WebRTC session is billed at least 15 s. A full 300 s session costs
+  $0.25, so the $25 default allows about 100 capped sessions a day. Admission reserves each open session at its cap,
   so concurrent sessions can't overshoot. With the sideband attached, spend uses OpenAI's reported
   `usage.seconds`. Without it, spend is wall-clock from mint until the cap, which is conservative.
 - **Jev.** About $0.000017 per decision (about 400 input tokens). Measured p50 is 108 ms and p90 149 ms from a dev box

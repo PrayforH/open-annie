@@ -97,6 +97,17 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); 
 .play[hidden] { display: none; }
 .capture .play { display: none; }
 
+/* Live session end control: staff-facing, deliberately discreet. */
+.end { position: absolute; right: 24px; bottom: 24px; z-index: 20; font: 500 13px "Inter", sans-serif; color: #fff; background: rgba(20, 20, 22, 0.45); border: 1px solid rgba(255, 255, 255, 0.28); border-radius: 99px; padding: 9px 16px; cursor: pointer; backdrop-filter: blur(6px); }
+.end:hover { background: rgba(20, 20, 22, 0.7); }
+.end[hidden], .end:disabled { display: none; }
+.capture .end { display: none; }
+
+/* Offline guide banner: shown when the network drops or the offline player is active. */
+.offline-notice { position: absolute; left: 50%; top: calc(var(--u) * 1.6); transform: translateX(-50%); z-index: 30; font: 500 13px "Inter", sans-serif; color: var(--ink-2); background: rgba(255, 255, 255, 0.92); border-radius: 99px; padding: 8px 18px; box-shadow: var(--shadow); pointer-events: none; white-space: nowrap; }
+.offline-notice[hidden] { display: none; }
+.capture .offline-notice { display: none; }
+
 @media (max-aspect-ratio: 1/1) {
   :root { --u: 2.4vw; }
   .convo { left: calc(var(--u) * 3); width: auto; top: auto; height: 34vh; bottom: calc(var(--u) * 12); }

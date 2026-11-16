@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
 
-from .config import JEV_USD_PER_INPUT_TOKEN, VOICE_INIT_SECONDS, VOICE_USD_PER_SECOND, Settings
+from .config import VOICE_INIT_SECONDS, Settings
 
 
 class Rejected(Exception):
@@ -81,7 +81,7 @@ class Budget:
         committed = self._closed_seconds + cap * self._pending + sum(
             max(cap, self._billed_seconds(r, now)) for r in self.sessions.values()
         )
-        if (committed + cap) * VOICE_USD_PER_SECOND + self._jev_usd > self.s.daily_budget_usd:
+        if (committed + cap) * self.s.voice_usd_per_second + self._jev_usd > self.s.daily_budget_usd:
             raise Rejected("budget_exhausted")
         self._pending += 1
         self._ip_counts[key] = self._ip_counts.get(key, 0) + 1
@@ -125,7 +125,7 @@ class Budget:
 
     def add_jev(self, input_tokens: int) -> None:
         self._roll()
-        self._jev_usd += max(0, int(input_tokens)) * JEV_USD_PER_INPUT_TOKEN
+        self._jev_usd += max(0, int(input_tokens)) * self.s.jev_usd_per_input_token
 
     def voice_seconds_today(self) -> float:
         self._roll()
@@ -133,7 +133,7 @@ class Budget:
         return self._closed_seconds + sum(self._billed_seconds(r, now) for r in self.sessions.values())
 
     def spent_today(self) -> float:
-        return self.voice_seconds_today() * VOICE_USD_PER_SECOND + self._jev_usd
+        return self.voice_seconds_today() * self.s.voice_usd_per_second + self._jev_usd
 
     def exhausted(self) -> bool:
         return self.spent_today() >= self.s.daily_budget_usd
@@ -145,4 +145,9 @@ class Budget:
             "active_sessions": len(self.sessions),
             "max_sessions": self.s.max_sessions,
             "voice_seconds_today": round(self.voice_seconds_today(), 1),
+            # The admitted-capacity ledger: budget / (cap_s/60 * $/min).
+            "voice_usd_per_min": self.s.voice_usd_per_min,
+            "session_cap_s": self.s.session_cap_s,
+            "session_cap_usd": round(self.s.session_cap_usd, 6),
+            "sessions_per_budget": self.s.sessions_per_budget,
         }

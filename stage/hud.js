@@ -48,6 +48,8 @@ export class Hud {
       const m = this.cur.annie ?? this.msgs.findLast((x) => x.who === "annie");
       if (m) m.cut = true;
     });
+    // Session cap notice: the same line is spoken locally before the call closes.
+    bus.on("session.warning", ({ text }) => this.#say("annie", text, true));
     bus.on("decision", (d) => this.#decision(d));
     bus.on("cue.face", (c) => this.#local(c));
   }
@@ -58,6 +60,11 @@ export class Hud {
 
   setMode(mode) {
     this.mode = mode;
+  }
+
+  // A local, non-speech line (audio blocked, cap notice, etc.).
+  notice(text) {
+    this.#say("annie", text, true);
   }
 
   // ---- transcript -----------------------------------------------------------

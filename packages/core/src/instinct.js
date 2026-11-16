@@ -41,7 +41,9 @@ export function replyQuestions(clips = ACTION_CLIPS) {
     },
     what: {
       type: "choice",
-      instructions: "Which single body clip best fits what Annie is doing as she says this?",
+      instructions:
+        "Choose one installed animation for Annie's current words. If Annie explicitly commits to a named action right now, " +
+        "pick that matching action over general body language. If she declines the requested action, do not pick it.",
       criteria: { ...Object.fromEntries(clips.map((c) => [c, CLIPS[c].when])), none: "no clip fits, or she isn't acting" },
     },
     reaction: {

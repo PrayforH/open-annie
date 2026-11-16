@@ -70,6 +70,31 @@ def test_budget_admission_reserves_worst_case():
         b.admit("c")
 
 
+def test_voice_price_is_configurable_and_drives_admission():
+    cheap = replace(BASE, daily_budget_usd=1.0, voice_usd_per_min=0.05, session_cap_s=300)
+    assert cheap.session_cap_usd == pytest.approx(0.25)
+    assert cheap.sessions_per_budget == 4  # $1 / $0.25
+
+    pricey = replace(cheap, voice_usd_per_min=0.36)  # a ¥0.36/min bill at 1:1
+    assert pricey.session_cap_usd == pytest.approx(1.80)
+    assert pricey.sessions_per_budget == 0
+
+    b = Budget(replace(pricey, daily_budget_usd=5.4), Clock())
+    b.open(b.admit("a"), "s1")
+    b.open(b.admit("b"), "s2")
+    b.open(b.admit("c"), "s3")  # 3 x $1.80 = $5.40, exactly the budget
+    with pytest.raises(Rejected, match="budget_exhausted"):
+        b.admit("d")
+
+
+def test_status_reports_pricing_ledger():
+    b = Budget(replace(BASE, daily_budget_usd=5.0, voice_usd_per_min=0.05), Clock())
+    status = b.status()
+    assert status["voice_usd_per_min"] == 0.05
+    assert status["session_cap_usd"] == pytest.approx(0.25)
+    assert status["sessions_per_budget"] == 20
+
+
 def test_budget_resets_at_utc_midnight():
     clock = Clock(1_790_035_199.0)  # 23:59:59 UTC
     b = Budget(replace(BASE, per_ip_daily=1), clock)
@@ -159,13 +184,24 @@ async def test_reaper_records_final_usage_from_session_closed():
 
 async def test_reaper_closes_at_cap():
     clock = Clock()
-    budget, ws, reaper = await _run_reaper([], clock, idle_timeout_s=10_000)
+    budget, ws, reaper = await _run_reaper([], clock, idle_timeout_s=10_000, session_cap_s=180)
     await asyncio.sleep(0.05)
     assert ws.sent == []
     clock.t += 181
     await asyncio.wait_for(asyncio.gather(*reaper.tasks.values()), 2)
     assert ws.sent == [{"type": "session.close", "event_id": "annie_cap"}]
     assert budget.voice_seconds_today() == 181.5
+
+
+async def test_reaper_keeps_300s_session_past_four_minutes():
+    clock = Clock()
+    budget, ws, reaper = await _run_reaper([], clock, idle_timeout_s=10_000, session_cap_s=300)
+    clock.t += 270  # 4 min 30 s: the product floor must not be kicked
+    await asyncio.sleep(0.05)
+    assert ws.sent == [] and "live_1" in budget.sessions
+    clock.t += 31
+    await asyncio.wait_for(asyncio.gather(*reaper.tasks.values()), 2)
+    assert ws.sent[0]["event_id"] == "annie_cap"
 
 
 async def test_reaper_closes_when_idle():
@@ -192,7 +228,7 @@ async def test_reaper_falls_back_to_wall_clock():
     def broken(url, headers):
         raise OSError("no sideband")
 
-    s = replace(BASE, sideband=True, hangup_fallback=True)
+    s = replace(BASE, sideband=True, hangup_fallback=True, session_cap_s=180)
     budget = Budget(s, clock)
     budget.open(budget.admit("ip"), "live_2")
     voice = NoVoice()

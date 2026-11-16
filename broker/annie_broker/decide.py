@@ -55,9 +55,11 @@ class DecideClient:
     ):
         self.s = settings
         self.clock = clock
+        self.provider = "d1" if settings.d1_base_url else "jev"
         self._client = httpx.AsyncClient(
-            base_url=settings.typesafe_base_url,
-            headers={"Authorization": f"Bearer {settings.typesafe_api_key}"},
+            base_url=settings.d1_base_url or settings.typesafe_base_url,
+            headers={} if settings.d1_base_url else {"Authorization": f"Bearer {settings.typesafe_api_key}"},
+            trust_env=not settings.d1_base_url,
             http2=True,
             timeout=httpx.Timeout(settings.decide_timeout_s),
             limits=httpx.Limits(max_keepalive_connections=8, keepalive_expiry=300),
@@ -72,7 +74,7 @@ class DecideClient:
 
     @property
     def available(self) -> bool:
-        return bool(self.s.typesafe_api_key) and not self.disabled
+        return bool(self.s.d1_base_url or self.s.typesafe_api_key) and not self.disabled
 
     @property
     def breaker_open(self) -> bool:
@@ -90,11 +92,11 @@ class DecideClient:
             if resp.status_code in (401, 403):
                 self._disable(resp.status_code)
         except httpx.HTTPError as exc:
-            log.info("jev warm-up failed: %s", type(exc).__name__)
+            log.info("%s warm-up failed: %s", self.provider, type(exc).__name__)
 
     def _disable(self, status: int) -> None:
         if not self.disabled:
-            log.error("jev rejected the API key (status=%s); /decide disabled", status)
+            log.error("%s rejected authentication (status=%s); /decide disabled", self.provider, status)
         self.disabled = True
 
     def _fail(self, reason: str) -> DecideUnavailable:
@@ -102,7 +104,7 @@ class DecideClient:
         if self.failures >= BREAKER_THRESHOLD:
             self.open_until = self.clock() + BREAKER_COOLDOWN_S
             if self.failures == BREAKER_THRESHOLD:
-                log.warning("jev circuit breaker open for %.0fs", BREAKER_COOLDOWN_S)
+                log.warning("%s circuit breaker open for %.0fs", self.provider, BREAKER_COOLDOWN_S)
         return DecideUnavailable(reason)
 
     def _session_allows(self, key: str) -> bool:
@@ -125,7 +127,9 @@ class DecideClient:
             raise DecideUnavailable("rate_limited")
         self.start_warm()
 
-        body = {"model": self.s.jev_model, "state": state, "questions": questions}
+        body = {"state": state, "questions": questions}
+        if self.provider == "jev":
+            body["model"] = self.s.jev_model
         started = time.perf_counter()
         try:
             async with asyncio.timeout(self.s.decide_timeout_s):
@@ -133,7 +137,7 @@ class DecideClient:
         except (TimeoutError, httpx.TimeoutException):
             raise self._fail("timeout") from None
         except httpx.HTTPError as exc:
-            log.info("jev transport error: %s", type(exc).__name__)
+            log.info("%s transport error: %s", self.provider, type(exc).__name__)
             raise self._fail("upstream_error") from None
         latency_ms = (time.perf_counter() - started) * 1000
 
@@ -144,7 +148,7 @@ class DecideClient:
         if status in (400, 422):
             raise DecideInvalid()
         if status != 200:
-            log.info("jev status=%s", status)
+            log.info("%s status=%s", self.provider, status)
             raise self._fail("rate_limited" if status in (429, 529) else "upstream_error")
         try:
             data = resp.json()
@@ -155,6 +159,8 @@ class DecideClient:
 
         self.failures = 0
         data["latency_ms"] = round(latency_ms, 1)
+        if self.provider == "d1":
+            data["source"] = "d1"
         return data
 
     async def aclose(self) -> None:

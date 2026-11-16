@@ -24,11 +24,19 @@ demo/                     the keyless preview's script and voice lines, the reco
 
 | Route | In | Out |
 |---|---|---|
-| `GET /health` | – | `{ok, version, providers: {voice: bool, decide: bool}}` |
-| `POST /session` | `{sdp, voice?, instructions?}` JSON | `{sdp, session_id, expires_at, token}` — SDP answer from GPT-Live, minted with the server key. `token` is an HMAC (session_id + expiry) required by `/decide`. |
+| `GET /health` | – | `{ok, version, providers: {voice: bool, decide: bool, rag: bool}, rag: {enabled, configured, breaker_open, retrieval, hybrid_requested, hybrid_available, hybrid_reason}}` |
+| `POST /session` | `{sdp, voice?, instructions?}` JSON | `{sdp, session_id, expires_at, token, rag: {enabled, timeout_ms}}` — SDP answer from GPT-Live, minted with the server key. `token` is an HMAC (session_id + expiry) required by `/decide` and `/rag`. |
 | `POST /decide` | `{token, state, questions}` (Jev `systemone` body minus `model`) | Jev response passthrough `{answers, usage}` plus `latency_ms`. 503 `{error:"decide_unavailable"}` when no key / breaker open / rate-shaped; the browser then uses its local floor. |
+| `POST /rag` | `{token, query}` | `{context, sources, score, reason, latency_ms, retrieval, hybrid_available, hybrid_reason}`. Always 200 for a valid token; `context` is `""` with `reason` in `ok, empty, below_threshold, timeout, upstream_error, breaker_open, disabled, rate_limited`. `retrieval` is `vector-only` today: WeKnora 0.9's keyword branch fails upstream (`SQLSTATE XX000`, keyword=0 on every query) and is reported, not silently implied. Bounded by `ANNIE_RAG_TIMEOUT_S` (default 1.2 s); failures fail open so speech never waits. |
+| `GET /rag/cards?area=` | – | `{text, count}` — L0/L1 static knowledge cards from `ANNIE_RAG_CARDS_PATH`, filtered by area; empty when unset. Prepended to the persona instructions at session start. |
 | `WS /decide` | same JSON per message, plus `id` | same JSON per reply, echoing `id` |
-| `GET /status` | – | `{spent_today_usd, budget_usd, active_sessions, max_sessions, voice_seconds_today}` |
+| `GET /status` | – | `{spent_today_usd, budget_usd, active_sessions, max_sessions, voice_seconds_today, voice_usd_per_min, session_cap_s, session_cap_usd, sessions_per_budget}` — `sessions_per_budget = budget_usd / (session_cap_s/60 × voice_usd_per_min)`, the same worst-case reservation admission uses. |
+
+**Internal network calls bypass the proxy.** The broker runs with `HTTP(S)_PROXY=127.0.0.1:7897`
+for GPT-Live, but Python proxy bypass ignores CIDR ranges, so any client that reaches
+`172.20.x` or a local service must pass `trust_env=False` and reuse one keep-alive pool.
+Measured 2026-11-12: reused connection p50 216 ms vs new connection p50 500 ms (rerank,
+50 docs), i.e. a fresh connection alone exceeds the 350 ms retrieval deadline.
 
 Upstream error bodies are never forwarded. No transcripts are retained.
 
@@ -40,6 +48,7 @@ Upstream error bodies are never forwarded. No transcripts are retained.
 - `assistant.partial {text}` / `assistant.final {text}` — output transcript so far (cumulative)
 - `assistant.audio.start` / `assistant.audio.end`
 - `bargein {}`
+- `rag.context {query, sources, score}` / `rag.miss {query, reason}` — L2 retrieval for the turn
 - `decision {kind: "listen"|"reply", answers, latency_ms, source: "jev"|"floor"|"mock"}`
 - `cue.face {name, intensity}` / `cue.clip {name, energy}` / `cue.reaction {name}`
 

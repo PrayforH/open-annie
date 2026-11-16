@@ -75,12 +75,13 @@ BASE = Settings(
 def make_client():
     clients = []
 
-    def _make(settings: Settings | None = None, openai=None, typesafe=None, **overrides):
+    def _make(settings: Settings | None = None, openai=None, typesafe=None, rag=None, **overrides):
         s = replace(settings or BASE, **overrides)
         broker = Broker(
             s,
             openai_transport=(openai or Upstream(live_session_ok)).transport,
             typesafe_transport=(typesafe or Upstream()).transport,
+            rag_transport=(rag.transport if isinstance(rag, Upstream) else rag) if rag else Upstream().transport,
         )
         client = TestClient(create_app(broker=broker))
         client.__enter__()

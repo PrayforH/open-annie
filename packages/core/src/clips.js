@@ -145,7 +145,7 @@ export const CLIPS = {
   dance: {
     kind: "action", // needs an explicit spoken commitment; everything else is an expressive gesture
     duration: 6.4,
-    when: "dancing, celebrating to music, party",
+    when: "Annie explicitly agrees to dance or says she will dance right now; dancing to music",
     f: (t, d) => {
       const w = env(t, d, 0.4, 0.6);
       const beat = 2; // 120 bpm
